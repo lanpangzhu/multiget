@@ -1,0 +1,165 @@
+#!/usr/bin/python3.5
+
+import argparse
+import requests
+import sys
+
+MAXSEGMENTSIZE = 2**20
+SEGMENTS = 4
+
+#address = "http://speedtest.ftp.otenet.gr/files/test1Mb.db"
+#address = "http://speedtest.ftp.otenet.gr/files/bogustest1Mb.db"
+#address = "http://speedtest.ftp.otenet.gr/files/test100k.db"
+#address = "http://www.gutenberg.org/files/100/100-h/100-h.htm"
+#address = "http://f39bf6aacfdfbf.bwtest-aws.pravala.com/384MB.jar"
+#address = "ftp://speedtest:speedtest@ftp.otenet.gr/test1Mb.db"
+##     head --bytes 4m 384MB.jar > small.jar
+##901f13b5dc2a732a48fdb77c6aa4cc4a  smallfinal2.jar
+##901f13b5dc2a732a48fdb77c6aa4cc4a  smallfinal3.jar
+##901f13b5dc2a732a48fdb77c6aa4cc4a  smallfinal.jar
+##901f13b5dc2a732a48fdb77c6aa4cc4a  small.jar
+##901f13b5dc2a732a48fdb77c6aa4cc4a  smalltest.jar
+
+
+def check_arg(args=None):
+    """
+    handle command line parameters. paralel is not supported,
+    but will be worked on as for the segments and sizes this works
+    when the numbers are correctly divided. this will not work say
+    if we select zero or perhaps if segs is one, but the server does
+    not support ranges. Since i reckon you don't want to flood the network
+    with http gets i limit the choices to 1 to 32. the limit for max size is
+    in the main portion.
+    """
+    parser = argparse.ArgumentParser(description='muliGet')
+    parser.add_argument('address',help="HTTP URL to download")
+    parser.add_argument('-parallel',action='store_true',help='Download chunks in parallel instead of sequentially')
+    parser.add_argument('-o',type=str,default='mult-get.out',help='Write Output to <file> instead of default')
+    parser.add_argument('-segs',type=int,default=SEGMENTS,choices=range(1,33),help='Number of segments to read and write')
+    parser.add_argument('-maxsize',type=int,default=MAXSEGMENTSIZE,help='Max Size of segments')
+
+    results = parser.parse_args(args)
+    return results
+
+def get_header(address):
+    """
+    get the file header to make an initial attempt at the file to see
+    file size and to see if the server supports the range option
+    the assumption here is that only HTTP is to be supported since only HTTPS
+    was excluded explicitly. 
+    """
+    try:
+        retval = requests.head(address)
+    except Exception as e:
+        print(e)
+        print("Verify the URL please, only HTTP is supported")
+        retval=None
+    return retval
+
+def get_chunk(address,chunksize,chunknum):
+    """
+    get the chunk determined by segment size and the number
+    of chunk in the order of the four fetched. if the file is less
+    than four megs it should be split in four chunks
+    """
+    
+    lowRange=int(chunknum*chunksize)
+    hiRange=int((chunknum+1)*chunksize-1)
+
+         
+    custom_header = { 'Range':'bytes={}-{}'.format(lowRange,hiRange)}
+    print("r",end=" ")
+    req = requests.get(address,headers=custom_header)
+    if req.status_code != requests.codes['partial_content']:
+        print("this is an error reading the range {} to {}".format(lowRange,hiRange))
+        print("with status code " + str(req.status_code))
+        req.close()
+        retval=None
+    else:
+        retval = req.content
+    return retval
+
+def verify_all(chunks):
+    """
+    verify that all four chunks were recieved before writing them
+    to file
+    """
+    retval = True
+    
+    for i in range(len(chunks)):
+        if chunks[i] == None:
+            retval = false
+            break
+    return retval
+
+def write_chunks(fname,chunks):
+    """
+    write the chunk to file, return true if no issue
+    false if an error
+    """
+    retval=True
+
+    try:
+        f = open(fname,"wb");
+    except Exception as e:
+        print(e)
+        print("Could not open the file "+fname)
+        retval=False
+        return retval
+
+    for i in range(len(chunks)):
+        try:    
+            f.write(chunks[i])
+            print("w ",end="")
+        except Exception as e:
+            print(e)
+            print("this is an error writing the segment " + i)
+            f.close()
+            retval=False
+            break
+    return retval
+
+def init_chunks(numchunks):
+    for i in range(numchunks):
+        chunks.append(None)
+    return chunks
+
+chunks=[]    
+params=check_arg(sys.argv[1:])
+address = params.address
+fname = params.o
+parallel=params.parallel
+numchunks=params.segs
+maxchunk=params.maxsize
+
+if maxchunk == 0:
+    print("please select a larger maxsize size, 0 is not supported")
+    exit(1)
+    
+chunks = init_chunks(numchunks)
+
+head = get_header(address)    
+
+if head.status_code != requests.codes['ok']:
+    print("An error in the file transfer reading the file:")
+    print(address)
+    print("the status code is "+ str(head.status_code))
+    sys.exit(1)
+elif head.headers["Accept-Ranges"] == 'none':
+    print("Ranges not accepted by the server " + address)
+    sys.exit(1)
+else:
+    fileSize = int(head.headers['Content-Length'])
+
+    if (fileSize < (numchunks*maxchunk)):
+        segment_size = fileSize/numchunks
+    else:
+        segment_size=maxchunk
+        fileSize = numchunks*maxchunk
+        
+    for  i in range(numchunks) :
+        chunks[i]=get_chunk(address,segment_size,i)
+
+    if verify_all(chunks):
+        if write_chunks(fname,chunks):
+            print("done")
